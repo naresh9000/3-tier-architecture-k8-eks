@@ -1,0 +1,18 @@
+# A simple example of ClusterConfig object with two nodegroups:
+--- 
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: 3-tier-architecture-k8-eks
+  region: ap-south-2
+
+nodeGroups:
+  - name: ng1-public
+    instanceType: t3.medium
+    instanceName: custom-node-name
+    desiredCapacity: 2
+  - name: ng2-private
+    instanceType: t3.medium
+    desiredCapacity: 2
+    privateNetworking: false
