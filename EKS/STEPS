@@ -1,0 +1,182 @@
+#					3-tier-architecture-K8s-EKS
+
+--------------------
+High level Design::
+User(registration and login) --mongoDb is used
+catalogue
+rating
+cart
+payment 
+shipping
+order complete
+
+For cart note::
+usually we add products to the cart and come back after 1 week or 1 month so instead  of having database with EBS volumes as persistent volumes to store that data , we are using the REDIS(In-memory database)
+and also we keep it as statefulset in kubernetes...
+----------------------------------------------------------
+
+Pre-Requisites:Install(see that they are latest versions)
+aws-cli
+kubectl
+eksctl
+git
+export cluster_name=3-tier-k8-eks-robot-shop
+
+1)create the eks cluster
+```
+eksctl create cluster --name $cluster_name --region ap-south-2
+```
+
+	By default aws will create the m5.large two nodes in nodegroup,so in order to use custom nodegroup configuration and reduce the cost per machines
+	use minimum medium machines(t3.medium).
+ ```
+ 	eksctl create cluster -f custom-nodeGroup-config.yaml
+ ```
+			-------------------------------
+			custom-nodeGroup-config.yaml
+			-------------------------------
+```
+			apiVersion: eksctl.io/v1alpha5
+			kind: ClusterConfig
+
+			metadata:
+			  name: 3-tier-architecture-k8-eks
+			  region: ap-south-2
+
+			nodeGroups:
+			  - name: ng1-public
+				instanceType: t3.medium
+				instanceName: custom-node-name
+				desiredCapacity: 2
+			  - name: ng2-private
+				instanceType: t3.medium
+				desiredCapacity: 2
+				privateNetworking: false
+```
+```
+aws eks update-kubeconfig --name $cluster_name --region ap-south-2
+```
+
+	
+	(Note:: 2 cloud formation stacks will be created)
+Note::
+usually using the fargate(serverless compute engine) also we can create the eks cluster rather using the bare ec2 machines.it depends on the nature of appilications develepement..
+Note:: each pod in Fargate runs in its own kernel, enhancing security.
+		usually we define the fargate profile in which we define which namespace and pods should run on the fargate..
+	
+	
+2)usually for every namespace within the cluster a service account by default is assigned by kubernetes api,Service accounts are used to provide an identity for processes that run in a Pod.
+service accounts are used to control the permissions and access levels that Pods have within the Kubernetes cluster. They are associated with a set of roles and role bindings, allowing you to manage access to various resources.
+
+so a service(REDis) is created as a statefulSet in kubernetes for our requirement(depends on the service developed),but for statefulSet to function we need the persistent volumes i.e EBS volumes of AWS ,so in order to that we are integarting the kubernetes service accounts with ther IAM(we will set the role and policies) .
+When running Kubernetes workloads on AWS EKS, these two identity systems can be integrated to allow pods to assume IAM roles and access AWS services
+
+```
+oidc_id=$(aws eks describe-cluster --name $cluster_name --query "cluster.identity.oidc.issuer" --output text | cut -d '/' -f 5) 
+```
+
+Check if there is an IAM OIDC provider configured already
+```
+aws iam list-open-id-connect-providers | grep $oidc_id | cut -d "/" -f4
+```
+
+If not, run the below command
+```
+eksctl utils associate-iam-oidc-provider --cluster $cluster_name --approve
+```
+
+3)To expose robot-shop to the externally using ingress and ingress controller ,configure the ALB first
+
+ALB configuration
+---------------------
+create iam policy
+```
+aws iam create-policy --policy-name AwsLoadBalancerConrollerPolicy --policy-document file://C:\\Users\\NARESH\\Desktop\\Devops\\Kubernetes@Devops\\policy_iam_serviceaccount.json 
+```
+	
+create the role and attach to the service account ..
+
+```
+eksctl create iamserviceaccount \
+--cluster=$cluster_name \
+--namespace=kube-system \
+--name=aws-load-balancer-controller-sa \
+--role-name awsEKSloadbalancerControllerRole \	
+--attach-policy-arn=arn:aws:iam::<Account-id>:policy/AwsLoadBalancerConrollerPolicy \
+--approve
+```
+(Note:: 1 cloud formation stack will be created)
+
+4)adding official helm(package manager) chart repository for EKS for deployment using helm charts.
+Note:; alternate ways we can use the manually with kubectl apply or GitOps for deployment
+```
+	helm repo add eks https://aws.github.io/eks-charts
+	helm repo update eks
+```
+install the helm chart for aws-load-balancer-controller
+To use the AWS Load Balancer Controller, you typically need to deploy it as a Kubernetes deployment within your cluster. It interacts with the AWS APIs to create and manage load balancers based on the specifications defined in Kubernetes resources.
+it enables the integration between the aws load balancers and kubernetes cluster
+features:: Automatic Configuration,Integration with Ingress Resources,
+			Support for ALB and NLB,
+```
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \            
+-n kube-system \
+--set clusterName=$cluster_name \
+--set serviceAccount.create=false \
+--set serviceAccount.name=aws-load-balancer-controller-sa \
+--set region=ap-south-2 \
+--set vpcId=<vpc-id>
+```
+Verify that the deployments are running
+```
+	kubectl get deployment -n kube-system aws-load-balancer-controller
+```	
+5)additionally EBS CSI (Container Storage Interface) Plugin
+	CSI is a standardized interface between container orchestrators (like Kubernetes) and storage providers. It allows storage vendors to create plugins that can be used with container orchestration platforms.
+
+	It enables features such as dynamic volume provisioning, volume expansion, and snapshot support for EBS volumes in Kubernetes.
+	
+	 EBS CSI driver needs to be installed on the nodes of your Kubernetes cluster. 
+So for this we need the role/serviceaccount to be created with necessary permissiions(policies)	 
+```
+eksctl create iamserviceaccount \
+--name ebs-csi-controller-sa \
+--namespace kube-system \
+--cluster $cluster_name \
+--role-name AmazonEKS_EBS_CSI_DriverRole \
+--role-only \
+--attach-policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+--approve
+```	 
+	 add on the plugin now..
+```	 
+eksctl create addon --name aws-ebs-csi-driver --cluster $cluster_name --service-account-role-arn arn:aws:iam::<Account-id>:role/AmazonEKS_EBS_CSI_DriverRole --force
+```
+6)clone/import/zip the repository for services deployment https://github.com/naresh9000/3-tier-architecture-k8-eks.git
+	 
+	 navigate to 3-tier-architecture-k8-ek/EKS/helm/
+```
+	kubectl create ns robot-shop
+	helm install ./ --namespace robot-shop 
+```
+	->(will deploy the componenets using  chart.yaml and values.yaml )
+	response::
+	--------
+	NAME: chart-1704992469
+	LAST DEPLOYED: Thu Jan 11 22:31:11 2024
+	NAMESPACE: robot-shop
+	STATUS: deployed
+	REVISION: 1
+	TEST SUITE: None
+
+	
+	Note::This Ingress resource, when applied to a Kubernetes cluster with the AWS ALB Ingress Controller 
+ deployed, will result in the creation of an new AWS ALB configured to route incoming HTTP traffic to the "web" service in 
+ the "robot-shop" namespace on port 8080. The ALB will be internet-facing .
+	we are exposing the services externally using the ingress
+ 
+	kubectl apply -f ingress.yaml
+	kubectl get ingress -n robot-shop
+	kubectl get pods -n robot-shop
+	kubectl get svc -n robot-shop
+	
